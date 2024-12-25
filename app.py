@@ -7,8 +7,6 @@ import requests
 
 path = os.path.abspath(os.path.join(os.path.dirname('app.py')))
 sys.path.insert(0, path)
-import data_preprocessing as dp
-from make_recommendations import recommend_movies_streamlit
 
 def load_data_from_pickle(save_path, filename):
     infile = open(os.path.join(save_path, f'{filename}.pkl'), 'rb')
