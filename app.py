@@ -1,9 +1,12 @@
+!pip install pickle
+
 import os
 import sys
 import pickle
 import numpy as np
 import streamlit as st
 import requests
+
 
 path = os.path.abspath(os.path.join(os.path.dirname('app.py')))
 sys.path.insert(0, path)
