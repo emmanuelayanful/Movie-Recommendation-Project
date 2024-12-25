@@ -1,5 +1,3 @@
-!pip install pickle
-
 import os
 import sys
 import pickle
