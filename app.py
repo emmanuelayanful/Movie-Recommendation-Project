@@ -84,9 +84,9 @@ select_rating = st.selectbox("Select rating (1-5)", ratings_list)
 movie_id = map_title_to_movie[select_movie]
 
 # Hyperparameters for recommendation
-LAMBDA = 0.08115077004505679
-GAMMA = 0.0007082444055226799
-TAU = 0.9841234864133226
+LAMBDA = 0.04575479782001026
+GAMMA = 0.0019315239283368617
+TAU = 0.9187409007825891
 K = 16
 
 if st.button("Show Recommendation"):
