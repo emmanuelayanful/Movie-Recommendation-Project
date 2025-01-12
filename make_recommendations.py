@@ -2,6 +2,7 @@ import os
 import numpy as np
 import data_preprocessing as dp
 
+
 def recommend_movies(model_path, movie_id, movie_rating, top_n, LAMBDA, GAMMA, TAU):
     # Define paths for loading saved files
     process_path = os.path.join(model_path, 'data preprocess')
@@ -88,10 +89,5 @@ def recommend_movies_streamlit(model_path, movie_id, movie_rating, top_n, LAMBDA
 
     # Map back to movie Titles
     item_titles = [map_movie_to_title[item_id] for item_id in top_movie_ids]
-    
-    # movie_title = map_movie_to_title[movie_id]
-
-    # print(f"Since you liked '{movie_title}', \nYou may also like: \n")
-    # for i, title in enumerate(item_titles):
-    #     print(f"{i+1}. {title}")
+   
     return item_titles
