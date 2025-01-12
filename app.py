@@ -74,19 +74,19 @@ map_title_to_movie = {map_movie_to_title[idx]: idx for idx in map_movie_to_title
 map_id_to_tmdb = {movieId: tmdbId for movieId, tmdbId in zip(links["movieId"].to_list(), links["tmdbId"].to_list())}
 
 movies_list = movies['title']
-ratings_list = [float(i) for i in range(1, 6)]
+ratings_list = list(np.arange(0.5, 5.5, 0.5))
 
 st.set_page_config(layout='wide')
 st.header("Movie Recommender Sysytem Using ALS Method and Matrix Factorization")
 select_movie = st.selectbox("Select movie from dropdown", movies_list)
-select_rating = st.selectbox("Select rating (1-5)", ratings_list)
+select_rating = st.selectbox("Select rating (0.5-5)", ratings_list)
 
 movie_id = map_title_to_movie[select_movie]
 
 # Hyperparameters for recommendation
-LAMBDA = 0.04575479782001026
-GAMMA = 0.0019315239283368617
-TAU = 0.9187409007825891
+LAMBDA = 0.0317
+GAMMA = 0.0007
+TAU = 0.6060
 K = 16
 
 if st.button("Show Recommendation"):
