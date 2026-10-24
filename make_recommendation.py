@@ -2,7 +2,7 @@ import os
 import numpy as np
 import pickle
 
-def load_data_from_pickle(save_path, filename, log=True):
+def load_data_from_pickle(save_path: str, filename: str, log=True):
     """
     Load a data object from a pickle file.
     
@@ -21,7 +21,7 @@ def load_data_from_pickle(save_path, filename, log=True):
         print(f'Loaded {filename} from .pkl file at {save_path}')
     return data
 
-def load_numpy_array(save_path, filename, log=True):
+def load_numpy_array(save_path: str, filename: str, log:bool=True):
     """
     Load a NumPy array from file.
     
@@ -39,7 +39,7 @@ def load_numpy_array(save_path, filename, log=True):
     else:
         return np.load(os.path.join(save_path, f'{filename}.npy'), allow_pickle=True)
 
-def load_numpy_array(save_path, filename, log=True):
+def load_numpy_array(save_path:str, filename:str, log:bool=True) -> np.ndarray:
     return np.load(os.path.join(save_path, f'{filename}.npy'), allow_pickle=True)
 
 def recommend_movies_bias_only_streamlit(base_path: str, movie_ids, movie_ratings, top_n: int, LAMBDA: float, GAMMA: float):
@@ -104,7 +104,7 @@ def recommend_movies_streamlit(base_path: str, movie_ids: list, movie_ratings: l
         LAMBDA, GAMMA, TAU  (float): Hyperparameters matching your training setup.
     """    
 
-    # Create directory for the experiment (small, 25m, 32m)
+    # load mappings and model parameters
     map_movie_to_id = load_data_from_pickle(base_path, 'map_movie_to_id', log=False)
     map_movie_to_title = load_data_from_pickle(base_path,'map_movie_to_title', log=False)
     movie_embeddings = load_numpy_array(base_path, 'movie_embeddings', log=False)

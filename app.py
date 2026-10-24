@@ -8,7 +8,7 @@ from make_recommendation import *
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
-print(PROJECT_ROOT)
+# print(PROJECT_ROOT)
 import streamlit as st
 import requests
 
@@ -16,7 +16,7 @@ module_path = os.path.abspath(os.path.join(os.path.dirname('app.py'), '.'))
 sys.path.insert(0, module_path)
 
 
-def fetch_movie_poster(movie_id):
+def fetch_movie_poster(movie_id:int):
     url = f"https://api.themoviedb.org/3/movie/{map_id_to_tmdb[movie_id]}?api_key=9f1339eba7ad0596ca0b8b7aaae99d64"
     data=requests.get(url)
     data=data.json()
