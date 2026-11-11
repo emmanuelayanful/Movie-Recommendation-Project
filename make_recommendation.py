@@ -1,167 +1,203 @@
-import os
-import numpy as np
+"""Inference-only functions for a deployed MovieLens ALS recommender.
+
+This module does not download MovieLens data or train models. It reads the
+saved movie parameters and trusted parameter dictionaries from ``assets/``.
+
+Rating-prediction models (no explicit global-mean intercept):
+    Bias-only:       r_hat(u, i) = b_u + b_i
+    Matrix factors:  r_hat(u, i) = b_u + b_i + p_u @ q_i
+
+The Matrix Factorization ranking uses a post-training heuristic:
+    rank_score(u, i) = p_u @ q_i + bias_weight * b_i.
+
+The constant new-user bias does not change the ranking of unseen movies.
+"""
+
+from __future__ import annotations
+
 import pickle
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping, Sequence
 
-def load_data_from_pickle(save_path: str, filename: str, log=True):
+import numpy as np
+
+DEFAULT_BIAS_WEIGHT = 0.05
+
+
+@dataclass(frozen=True)
+class BiasOnlyModel:
+    movie_biases: np.ndarray
+    lambda_reg: float
+    gamma: float
+
+
+@dataclass(frozen=True)
+class FactorModel:
+    movie_biases: np.ndarray
+    movie_embeddings: np.ndarray
+    lambda_reg: float
+    gamma: float
+    tau: float
+
+
+def _parameters(path: Path, required: set[str]) -> dict[str, float]:
+    """Load a trusted pickle dictionary containing model hyperparameters.
+
+    The dictionary must use the lowercase keys ``lambda_reg``, ``gamma`` and,
+    for the factor model, ``tau``. No Optuna study object is needed at inference.
     """
-    Load a data object from a pickle file.
-    
-    Args:
-        save_path (str): Directory where the pickle file is located.
-        filename (str): Name of the pickle file without the extension.
-        log (bool): If True, print a message indicating the file loaded.
+    with path.open("rb") as file:
+        params = pickle.load(file)  # Only load trusted deployment-owned files.
 
-    Returns:
-        object: The loaded data object.
+    if not isinstance(params, dict):
+        raise TypeError(f"Expected a hyperparameter dictionary in {path}.")
+
+    missing = required - params.keys()
+    if missing:
+        raise ValueError(f"Missing hyperparameters in {path}: {sorted(missing)}")
+
+    values = {key: float(params[key]) for key in required}
+    if not all(np.isfinite(value) for value in values.values()):
+        raise ValueError(f"Non-finite hyperparameters in {path}.")
+    if values["lambda_reg"] <= 0 or values["gamma"] < 0:
+        raise ValueError("lambda_reg must be positive and gamma nonnegative.")
+    if "tau" in values and values["tau"] <= 0:
+        raise ValueError("tau must be positive.")
+    return values
+
+
+def load_bias_model(asset_dir: str | Path, n_movies: int) -> BiasOnlyModel:
+    """Load a Bias-Only model, validating its array length."""
+    root = Path(asset_dir)
+    params = _parameters(root / "params_bias.pkl", {"lambda_reg", "gamma"})
+    biases = np.load(root / "movie_biases_b.npy", allow_pickle=False)
+    if biases.shape != (n_movies,) or not np.isfinite(biases).all():
+        raise ValueError("Bias-Only movie biases do not match the movie mappings.")
+    biases.flags.writeable = False
+    return BiasOnlyModel(movie_biases=biases, **params)
+
+
+def load_factor_model(asset_dir: str | Path, n_movies: int) -> FactorModel:
+    """Load a factor model, validating embedding and bias dimensions."""
+    root = Path(asset_dir)
+    params = _parameters(
+        root / "params_bias_factors.pkl", {"lambda_reg", "gamma", "tau"}
+    )
+    biases = np.load(root / "movie_biases.npy", allow_pickle=False)
+    embeddings = np.load(root / "movie_embeddings.npy", allow_pickle=False)
+    if (
+        biases.shape != (n_movies,)
+        or embeddings.ndim != 2
+        or embeddings.shape[0] != n_movies
+        or embeddings.shape[1] < 1
+    ):
+        raise ValueError("Factor-model arrays do not match the movie mappings.")
+    if not np.isfinite(biases).all() or not np.isfinite(embeddings).all():
+        raise ValueError("Factor-model arrays contain non-finite values.")
+    biases.flags.writeable = False
+    embeddings.flags.writeable = False
+    return FactorModel(movie_biases=biases, movie_embeddings=embeddings, **params)
+
+
+def _validate_inputs(
+    movie_ids: Sequence[int],
+    movie_ratings: Sequence[float],
+    movie_id_to_index: Mapping[int, int],
+    top_n: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if not movie_ids or len(movie_ids) != len(movie_ratings):
+        raise ValueError("Select at least one movie with one rating per movie.")
+    if len(set(movie_ids)) != len(movie_ids):
+        raise ValueError("Each selected movie must be unique.")
+    if not isinstance(top_n, int) or top_n < 1:
+        raise ValueError("top_n must be a positive integer.")
+    missing = [movie_id for movie_id in movie_ids if movie_id not in movie_id_to_index]
+    if missing:
+        raise ValueError(f"Selected movies are missing from the model: {missing}")
+    ratings = np.asarray(movie_ratings, dtype=np.float64)
+    if not np.isfinite(ratings).all() or np.any((ratings < 0.5) | (ratings > 5)):
+        raise ValueError("Movie ratings must be between 0.5 and 5.0.")
+    indices = np.asarray([movie_id_to_index[x] for x in movie_ids], dtype=np.int64)
+    return indices, ratings
+
+
+def _rank(
+    scores: np.ndarray,
+    rated_indices: np.ndarray,
+    index_to_movie_id: Sequence[int],
+    movie_titles: Mapping[int, str],
+    top_n: int,
+) -> list[dict[str, object]]:
+    """Return ranked movie IDs, titles, and scores, excluding rated movies."""
+    candidate_scores = np.asarray(scores, dtype=np.float64).copy()
+    candidate_scores[rated_indices] = -np.inf
+    n = min(top_n, len(candidate_scores) - len(set(rated_indices.tolist())))
+    if n <= 0:
+        return []
+    # Stable descending sort ensures deterministic ties.
+    chosen = np.argsort(-candidate_scores, kind="stable")[:n]
+    return [
+        {
+            "movieId": int(index_to_movie_id[int(idx)]),
+            "title": movie_titles[int(index_to_movie_id[int(idx)])],
+            "score": float(candidate_scores[idx]),
+        }
+        for idx in chosen
+    ]
+
+
+def recommend_bias_only(
+    model: BiasOnlyModel,
+    movie_ids: Sequence[int],
+    movie_ratings: Sequence[float],
+    movie_id_to_index: Mapping[int, int],
+    index_to_movie_id: Sequence[int],
+    movie_titles: Mapping[int, str],
+    top_n: int = 10,
+) -> list[dict[str, object]]:
     """
-    infile = open(os.path.join(save_path, f'{filename}.pkl'), 'rb')
-    data = pickle.load(infile)
-    infile.close()
-    if log:
-        print(f'Loaded {filename} from .pkl file at {save_path}')
-    return data
+    Rank unseen movies by their learned item biases.
 
-def load_numpy_array(save_path: str, filename: str, log:bool=True):
+    With a bias-only model, changing a new user's rating values does not
+    change item ranking; rating inputs only identify movies to exclude.
     """
-    Load a NumPy array from file.
-    
-    Args:
-        save_path (str): Directory where the file is located.
-        filename (str): Name of the file without the extension.
-        log (bool): If True, print a message indicating the file loaded.
+    indices, _ = _validate_inputs(movie_ids, movie_ratings, movie_id_to_index, top_n)
+    return _rank(model.movie_biases, indices, index_to_movie_id, movie_titles, top_n)
 
-    Returns:
-        numpy.ndarray: The loaded NumPy array.
+
+def recommend_factors(
+    model: FactorModel,
+    movie_ids: Sequence[int],
+    movie_ratings: Sequence[float],
+    movie_id_to_index: Mapping[int, int],
+    index_to_movie_id: Sequence[int],
+    movie_titles: Mapping[int, str],
+    top_n: int = 10,
+    bias_weight: float = DEFAULT_BIAS_WEIGHT,
+) -> list[dict[str, object]]:
     """
-    if log:
-        print(f'Loaded {filename} from .npy file at {save_path}')
-        return np.load(os.path.join(save_path, f'{filename}.npy'), allow_pickle=True)
-    else:
-        return np.load(os.path.join(save_path, f'{filename}.npy'), allow_pickle=True)
-
-def load_numpy_array(save_path:str, filename:str, log:bool=True) -> np.ndarray:
-    return np.load(os.path.join(save_path, f'{filename}.npy'), allow_pickle=True)
-
-def recommend_movies_bias_only_streamlit(base_path: str, movie_ids, movie_ratings, top_n: int, LAMBDA: float, GAMMA: float):
+    Fit a new user with five ALS updates and rank unseen movies.
     """
-    Recommend movies for a *new* user based on rated movies.
-    Args:
-        base_path (str): Base directory where the ratings file would be.
-        movie_ids (list) : List of movieId values that the user has rated.
-        movie_ratings (list) : Corresponding ratings the user gave to those movie_ids.
-        top_n (int) : Number of recommendations to return.
-        LAMBDA, GAMMA (float): Hyperparameters matching your training setup.
-    """
+    indices, ratings = _validate_inputs(movie_ids, movie_ratings, movie_id_to_index, top_n)
+    if not np.isfinite(bias_weight) or bias_weight < 0:
+        raise ValueError("bias_weight must be finite and nonnegative.")
 
-    # load mappings and model parameters
-    map_movie_to_id = load_data_from_pickle(base_path, 'map_movie_to_id', log=False)
-    map_movie_to_title = load_data_from_pickle(base_path,'map_movie_to_title', log=False)
-    map_id_to_movie = load_data_from_pickle(base_path, 'map_id_to_movie', log=False)
-    movie_biases = load_numpy_array(base_path, 'movie_biases', log=False)
-
-    # movie_biases
-    movie_biases = load_numpy_array(base_path, "movie_biases_b", log=False)
-    # global_mean: scalar
-    ratings = load_data_from_pickle(base_path, 'ratings', log=False)
-    global_mean = ratings['rating'].mean()
-
-    # build arrays for rated movies
-    rated_indices = [map_movie_to_id[m_id] for m_id in movie_ids]
-    r = np.array(movie_ratings, dtype=float)          # (n,)
-    b_i = movie_biases[rated_indices]                 # (n,)
-    n_rated = len(rated_indices)
-
-    # compute new user bias b_u 
-    residuals = r - (global_mean + b_i)               # (n,)
-    user_bias = LAMBDA * residuals.sum() / (LAMBDA * n_rated + GAMMA)
-
-    # predict score for all movies
-    scores = global_mean + movie_biases + user_bias   # (num_movies,)
-
-    # don't recommend already-rated movies
-    scores[rated_indices] = -np.inf
-
-    # top-N
-    top_indices = np.argsort(scores)[-top_n:][::-1]
-
-    top_movie_ids = [map_id_to_movie[i] for i in top_indices]
-    top_titles = [map_movie_to_title[m_id] for m_id in top_movie_ids]
-
-    return top_titles
-
-
-
-
-def recommend_movies_streamlit(base_path: str, movie_ids: list, movie_ratings: list, top_n: int, LAMBDA: float, GAMMA: float, TAU: float):
-    """
-    Recommend movies for a *new* user based on rated movies.
-
-    Args:
-        base_path (str): Base directory where the ratings file would be.
-        movie_ids (list) : List of movieId values that the user has rated.
-        movie_ratings (list) : Corresponding ratings the user gave to those movie_ids.
-        top_n (int) : Number of recommendations to return.
-        LAMBDA, GAMMA, TAU  (float): Hyperparameters matching your training setup.
-    """    
-
-    # load mappings and model parameters
-    map_movie_to_id = load_data_from_pickle(base_path, 'map_movie_to_id', log=False)
-    map_movie_to_title = load_data_from_pickle(base_path,'map_movie_to_title', log=False)
-    movie_embeddings = load_numpy_array(base_path, 'movie_embeddings', log=False)
-    map_id_to_movie = load_data_from_pickle(base_path, 'map_id_to_movie', log=False)
-    movie_biases = load_numpy_array(base_path, 'movie_biases', log=False)
-
-    k = movie_embeddings.shape[1]   # embedding dimension
-
-    # Build matrices for the rated movies
-    # Map movie_ids to internal indices
-    rated_indices = [map_movie_to_id[m_id] for m_id in movie_ids]
-
-    # Stack embeddings and biases
-    E = movie_embeddings[rated_indices]    
-    b = movie_biases[rated_indices]       
-    r = np.array(movie_ratings, dtype=float)
-
-    n_rated = E.shape[0]
-
-    # Initialize user embedding and bias
-    user_embedding = np.zeros((k,))
+    E = model.movie_embeddings[indices]
+    item_biases = model.movie_biases[indices]
+    n_rated, n_factors = E.shape
+    user_embedding = np.zeros(n_factors, dtype=np.float64)
     user_bias = 0.0
 
-    # Iterative closed-form updates
-    I_k = np.eye(k)
-
+    normal_matrix = model.lambda_reg * (E.T @ E) + model.tau * np.eye(n_factors)
     for _ in range(5):
-        # Predicted ratings with current user_embedding & bias (for rated items)
-        pred = E @ user_embedding + b + user_bias
-        residual = r - pred                        
+        rhs = model.lambda_reg * (E.T @ (ratings - item_biases - user_bias))
+        user_embedding = np.linalg.solve(normal_matrix, rhs)
+        residuals = ratings - E @ user_embedding - item_biases
+        user_bias = model.lambda_reg * residuals.sum() / (
+            model.lambda_reg * n_rated + model.gamma
+        )
 
-        # Update user_embedding:
-        inverse_term = LAMBDA * (E.T @ E) + TAU * I_k   
-        other_term = E.T @ (LAMBDA * (r - (b + user_bias)))
-        user_embedding = np.linalg.solve(inverse_term, other_term)
-
-        # Update user_bias
-        pred_no_ubias = E @ user_embedding + b
-        residual_no_ubias = r - pred_no_ubias
-        user_bias = LAMBDA * residual_no_ubias.sum() / (LAMBDA * n_rated + GAMMA)
-
-    # Compute scores for all movies 
-    # shape: (num_movies,)
-    scores = movie_embeddings @ user_embedding + user_bias + 0.05 * movie_biases
-
-    # Don't recommend the movies the user already rated
-    mask = np.ones_like(scores, dtype=bool)
-    mask[rated_indices] = False
-
-    scores_filtered = scores.copy()
-    scores_filtered[~mask] = -np.inf  # so they never appear in top-N
-
-    # Top-N indices
-    top_indices = np.argsort(scores_filtered)[-top_n:][::-1]
-
-    # Map to movie IDs and titles
-    top_movie_ids = [map_id_to_movie[i] for i in top_indices]
-    item_titles = [map_movie_to_title[m_id] for m_id in top_movie_ids]
-
-    return item_titles
+    # User bias is constant across candidate movies and doesn't affect ranking.
+    scores = model.movie_embeddings @ user_embedding + bias_weight * model.movie_biases
+    return _rank(scores, indices, index_to_movie_id, movie_titles, top_n)
